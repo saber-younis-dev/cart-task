@@ -1,0 +1,8 @@
+/* Hide any absolutely positioned card in the top right corner that is not part of the main layout */
+.card, .MuiCard-root {
+  /* Only target cards that are absolutely positioned in the top right */
+  position: absolute !important;
+  top: 0 !important;
+  right: 0 !important;
+  display: none !important;
+} 
