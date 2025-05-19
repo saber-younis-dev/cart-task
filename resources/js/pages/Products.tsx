@@ -29,8 +29,6 @@ import axios from 'axios'; // Make sure to install axios
 
 const initialCart = [];
 
-const categories = ['T-shirts', 'Polo', 'Jeans', 'Shirts'];
-
 const Products = () => {
     const [cart, setCart] = useState(initialCart);
     const [quantities, setQuantities] = useState({});
@@ -42,6 +40,7 @@ const Products = () => {
         total: 0,
         last_page: 1
     });
+    const [categories, setCategories] = useState([]);
 
     const navigate = useNavigate();
     const [drawerOpen, setDrawerOpen] = useState(false);
@@ -51,10 +50,38 @@ const Products = () => {
     const [appliedPrice, setAppliedPrice] = useState([0, 300]);
     const [appliedCategories, setAppliedCategories] = useState([]);
 
+    // Fetch distinct categories from API
+    const fetchCategories = async () => {
+        try {
+            const response = await axios.get('/api/categories');
+            setCategories(response.data);
+        } catch (error) {
+            console.error('Error fetching categories:', error);
+            // Fallback to extracting categories from products if dedicated endpoint fails
+            if (products.length > 0) {
+                const uniqueCategories = [...new Set(products.map(product => product.category))];
+                setCategories(uniqueCategories);
+            }
+        }
+    };
+
     // Fetch products from API
     useEffect(() => {
         fetchProducts();
     }, [pagination.current_page, search, appliedPrice, appliedCategories]);
+
+    // Fetch categories when component mounts
+    useEffect(() => {
+        fetchCategories();
+    }, []);
+
+    // Alternative: Extract categories from products if no dedicated endpoint
+    useEffect(() => {
+        if (products.length > 0 && categories.length === 0) {
+            const uniqueCategories = [...new Set(products.map(product => product.category))];
+            setCategories(uniqueCategories);
+        }
+    }, [products]);
 
     // Initialize quantities state when products change
     useEffect(() => {

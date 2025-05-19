@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
     Box,
     Card,
@@ -18,85 +18,119 @@ import AddIcon from '@mui/icons-material/Add';
 import DeleteIcon from '@mui/icons-material/Delete';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import authService, { api } from '../services/authService';
+import { api } from '../services/authService';
 
-const orderNumber = 123;
-const orderDate = new Date(2025, 4, 5).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' });
+// Constants moved outside component to prevent recreations
+const CURRENT_DATE = new Date().toLocaleDateString('en-US', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric'
+});
+
+// Storage keys as constants for better maintainability
+const STORAGE_KEYS = {
+    CART: 'cart',
+    PENDING_CART: 'pendingCart'
+};
 
 const Cart = () => {
     const location = useLocation();
     const navigate = useNavigate();
-
-    // Check if there's cart data in location state or restore from localStorage
-    const savedCart = localStorage.getItem('cart');
-    const initialCart = location.state?.cart || (savedCart ? JSON.parse(savedCart) : []);
-
-    const [cartItems, setCartItems] = useState(initialCart);
-    const [notification, setNotification] = useState({ open: false, message: '', severity: 'info' });
-
-    // Use the auth context
     const { isAuthenticated, loading, user } = useAuth();
 
-    // Add a local auth state that will be used for UI rendering
-    const [authState, setAuthState] = useState({
-        isAuthenticated: isAuthenticated,
-        loading: loading
+    // Initialize cart with proper fallback handling
+    const [cartItems, setCartItems] = useState(() => {
+        // First check location state
+        if (location.state?.cart) {
+            return location.state.cart;
+        }
+
+        // Then check localStorage with safe parsing
+        try {
+            const savedCart = localStorage.getItem(STORAGE_KEYS.CART);
+            return savedCart ? JSON.parse(savedCart) : [];
+        } catch (error) {
+            console.error('Error parsing cart from localStorage:', error);
+            return [];
+        }
     });
 
-    // Update local auth state whenever the auth context changes
-    useEffect(() => {
-        setAuthState({
-            isAuthenticated: isAuthenticated,
-            loading: loading
-        });
-    }, [isAuthenticated, loading]);
+    const [notification, setNotification] = useState({
+        open: false,
+        message: '',
+        severity: 'info'
+    });
 
     // Save cart to localStorage whenever it changes
     useEffect(() => {
-        localStorage.setItem('cart', JSON.stringify(cartItems));
+        try {
+            localStorage.setItem(STORAGE_KEYS.CART, JSON.stringify(cartItems));
+        } catch (error) {
+            console.error('Error saving cart to localStorage:', error);
+            setNotification({
+                open: true,
+                message: 'Failed to save your cart. Please check browser storage settings.',
+                severity: 'warning'
+            });
+        }
     }, [cartItems]);
 
     // Show welcome notification if redirected from login
     useEffect(() => {
-        if (location.state?.fromLogin && isAuthenticated) {
+        if (location.state?.fromLogin && isAuthenticated && user) {
             setNotification({
                 open: true,
-                message: `Welcome back${user?.name ? ', ' + user.name : ''}! You can now place your order.`,
+                message: `Welcome back${user.name ? ', ' + user.name : ''}! You can now place your order.`,
                 severity: 'success'
             });
 
-            // Clear the fromLogin state to prevent showing the notification again on page refresh
-            const newState = { ...location.state };
-            delete newState.fromLogin;
+            // Clear the fromLogin state to prevent showing the notification again
             navigate(location.pathname, {
-                state: newState,
+                state: { ...location.state, fromLogin: undefined },
                 replace: true
             });
         }
-    }, [location.state, isAuthenticated]);
+    }, [location.state, isAuthenticated, user, navigate]);
 
-    const handleQtyChange = (id, delta) => {
-        setCartItems((prev) =>
-            prev
-                .map((item) =>
-                    item.id === id ? { ...item, qty: Math.max(1, item.qty + delta) } : item
+    // Memoized cart operations for better performance
+    const handleQtyChange = useCallback((id, delta) => {
+        setCartItems(prevItems =>
+            prevItems
+                .map(item =>
+                    item.id === id
+                        ? { ...item, qty: Math.max(1, item.qty + delta) }
+                        : item
                 )
-                .filter((item) => item.qty > 0)
+                .filter(item => item.qty > 0)
         );
-    };
+    }, []);
 
-    const handleRemove = (id) => {
-        setCartItems((prev) => prev.filter((item) => item.id !== id));
-    };
+    const handleRemove = useCallback((id) => {
+        setCartItems(prevItems => prevItems.filter(item => item.id !== id));
+    }, []);
 
-    const subtotal = cartItems.reduce((sum, item) => sum + item.price * item.qty, 0);
-    const shipping = 15;
-    const tax = 12.5;
-    const total = subtotal + shipping + tax;
+    // Close notification handler (memoized)
+    const handleCloseNotification = useCallback(() => {
+        setNotification(prev => ({ ...prev, open: false }));
+    }, []);
+
+    // Calculate totals with useMemo for better performance
+    const orderSummary = useMemo(() => {
+        const subtotal = cartItems.reduce((sum, item) => sum + parseFloat(item.price) * item.qty, 0);
+        const shipping = cartItems.length > 0 ? 15 : 0; // No shipping if cart is empty
+        const tax = subtotal * 0.05; // 5% tax
+
+        return {
+            subtotal,
+            shipping,
+            tax,
+            total: subtotal + shipping + tax
+        };
+    }, [cartItems]);
 
     // Handle place order button click
-    const handlePlaceOrder = () => {
-        if (!authState.isAuthenticated) {
+    const handlePlaceOrder = useCallback(async () => {
+        if (!isAuthenticated) {
             // Show notification
             setNotification({
                 open: true,
@@ -105,7 +139,11 @@ const Cart = () => {
             });
 
             // Save cart to localStorage before redirecting
-            localStorage.setItem('pendingCart', JSON.stringify(cartItems));
+            try {
+                localStorage.setItem(STORAGE_KEYS.PENDING_CART, JSON.stringify(cartItems));
+            } catch (error) {
+                console.error('Error saving pending cart:', error);
+            }
 
             // Redirect to login page with return URL
             navigate('/login', {
@@ -114,14 +152,10 @@ const Cart = () => {
                     message: 'Please log in to complete your order'
                 }
             });
-        } else {
-            // Process order for authenticated user
-            processOrder();
+            return;
         }
-    };
 
-    // Process the order for authenticated users
-    const processOrder = async () => {
+        // Process order for authenticated user
         try {
             setNotification({
                 open: true,
@@ -136,9 +170,7 @@ const Cart = () => {
             }));
 
             // Use the configured api instance with auth token
-            const response = await api.post('/orders', {
-                products: products
-            });
+            const response = await api.post('/orders', { products });
 
             // Handle successful order
             setNotification({
@@ -149,7 +181,7 @@ const Cart = () => {
 
             // Clear the cart after successful order
             setCartItems([]);
-            localStorage.removeItem('cart');
+            localStorage.removeItem(STORAGE_KEYS.CART);
 
             // Redirect to order confirmation page
             setTimeout(() => {
@@ -161,8 +193,12 @@ const Cart = () => {
         } catch (error) {
             console.error('Order processing failed:', error);
 
-            // Check for specific error messages from the API
-            const errorMessage = error.response?.data?.error || 'Failed to process order. Please try again.';
+            // Extract error message with better fallbacks
+            const errorMessage =
+                error.response?.data?.message ||
+                error.response?.data?.error ||
+                error.message ||
+                'Failed to process order. Please try again.';
 
             setNotification({
                 open: true,
@@ -170,107 +206,226 @@ const Cart = () => {
                 severity: 'error'
             });
         }
-    };
+    }, [cartItems, isAuthenticated, navigate]);
 
-    // Close notification
-    const handleCloseNotification = () => {
-        setNotification(prev => ({ ...prev, open: false }));
-    };
+    // Render empty cart message to avoid repetition
+    const renderEmptyCart = () => (
+        <Paper
+            elevation={0}
+            sx={{
+                p: 4,
+                textAlign: 'center',
+                borderRadius: 2,
+                bgcolor: '#f7f8fa'
+            }}
+        >
+            <Typography sx={{ color: 'grey.600', fontSize: 16, mb: 2 }}>
+                Your cart is empty
+            </Typography>
+            <Button
+                variant="outlined"
+                onClick={() => navigate('/products')}
+                sx={{
+                    mt: 1,
+                    fontWeight: 600,
+                    borderColor: '#000',
+                    color: '#000',
+                    '&:hover': { borderColor: '#222', bgcolor: 'rgba(0,0,0,0.04)' }
+                }}
+            >
+                Continue Shopping
+            </Button>
+        </Paper>
+    );
 
-    // Force refresh auth state - can be useful when returning from login
-    const refreshAuthState = () => {
-        setAuthState({
-            isAuthenticated: isAuthenticated,
-            loading: loading
-        });
-    };
-
-    // Check auth state on mount and when the component becomes visible
-    useEffect(() => {
-        refreshAuthState();
-
-        // Also refresh when the window regains focus (e.g., after returning from login)
-        const handleFocus = () => refreshAuthState();
-        window.addEventListener('focus', handleFocus);
-
-        return () => window.removeEventListener('focus', handleFocus);
-    }, []);
+    // Render cart item to avoid repetition
+    const renderCartItem = (item) => (
+        <Card
+            key={item.id}
+            sx={{
+                mb: 3,
+                p: 2,
+                borderRadius: 2,
+                boxShadow: '0 2px 8px 0 rgba(0,0,0,0.04)',
+                transition: 'all 0.2s ease',
+                '&:hover': {
+                    boxShadow: '0 4px 12px 0 rgba(0,0,0,0.08)'
+                }
+            }}
+        >
+            <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                <CardMedia
+                    component="img"
+                    image={item.image}
+                    alt={item.name}
+                    sx={{
+                        width: 120,
+                        height: 120,
+                        objectFit: 'cover',
+                        borderRadius: 2,
+                        mr: 3,
+                        bgcolor: '#f7f8fa'
+                    }}
+                />
+                <Box sx={{ flex: 1 }}>
+                    <Typography
+                        fontWeight={600}
+                        sx={{
+                            fontSize: 18,
+                            mb: 0.5,
+                            display: 'flex',
+                            alignItems: 'center'
+                        }}
+                    >
+                        {item.name}
+                        <Chip
+                            label={item.type}
+                            size="small"
+                            sx={{
+                                ml: 1,
+                                fontSize: 11,
+                                fontWeight: 600,
+                                bgcolor: '#f7f8fa'
+                            }}
+                        />
+                    </Typography>
+                    <Typography fontWeight={700} sx={{ fontSize: 16, mb: 0.5 }}>
+                        ${parseFloat(item.price).toFixed(2)}
+                    </Typography>
+                    <Typography sx={{ color: 'grey.500', fontSize: 14, mb: 1 }}>
+                        Stock: {item.stock}
+                    </Typography>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        <IconButton
+                            size="small"
+                            onClick={() => handleQtyChange(item.id, -1)}
+                            aria-label="Decrease quantity"
+                        >
+                            <RemoveIcon fontSize="small" />
+                        </IconButton>
+                        <Typography sx={{ minWidth: 24, textAlign: 'center', fontSize: 16 }}>
+                            {item.qty}
+                        </Typography>
+                        <IconButton
+                            size="small"
+                            onClick={() => handleQtyChange(item.id, 1)}
+                            disabled={item.qty >= item.stock}
+                            aria-label="Increase quantity"
+                        >
+                            <AddIcon fontSize="small" />
+                        </IconButton>
+                    </Box>
+                </Box>
+                <IconButton
+                    size="large"
+                    sx={{ color: 'error.main', ml: 2 }}
+                    onClick={() => handleRemove(item.id)}
+                    aria-label="Remove item"
+                >
+                    <DeleteIcon />
+                </IconButton>
+            </Box>
+        </Card>
+    );
 
     return (
-        <Container maxWidth="xl" sx={{ mt: 4 }}>
+        <Container maxWidth="xl" sx={{ mt: 4, mb: 8 }}>
             <Box sx={{ display: 'flex', gap: 4, alignItems: 'flex-start', flexDirection: { xs: 'column', md: 'row' } }}>
                 {/* Left: Cart Items */}
                 <Box sx={{ flex: 3, width: '100%' }}>
-                    <Box sx={{ color: 'grey.600', fontSize: 14, mb: 2 }}>Home / <b>Cart</b></Box>
-                    <Typography variant="h4" fontWeight={700} sx={{ mb: 3 }}>Your cart</Typography>
-                    {cartItems.length === 0 ? (
-                        <Typography align="center" sx={{ color: 'grey.600', fontSize: 15, mb: 2 }}>
-                            No items in cart.
-                        </Typography>
-                    ) : (
-                        cartItems.map((item) => (
-                            <Card key={item.id} sx={{ mb: 3, p: 2, borderRadius: 3, boxShadow: '0 2px 8px 0 rgba(0,0,0,0.04)' }}>
-                                <Box sx={{ display: 'flex', alignItems: 'center' }}>
-                                    <CardMedia
-                                        component="img"
-                                        image={item.image}
-                                        alt={item.name}
-                                        sx={{ width: 120, height: 120, objectFit: 'cover', borderRadius: 2, mr: 3, bgcolor: '#f7f8fa' }}
-                                    />
-                                    <Box sx={{ flex: 1 }}>
-                                        <Typography fontWeight={600} sx={{ fontSize: 18, mb: 0.5, display: 'flex', alignItems: 'center' }}>
-                                            {item.name}
-                                            <Chip label={item.type} size="small" sx={{ ml: 1, fontSize: 11, fontWeight: 600, bgcolor: '#f7f8fa' }} />
-                                        </Typography>
-                                        <Typography fontWeight={700} sx={{ fontSize: 16, mb: 0.5 }}>${item.price}</Typography>
-                                        <Typography sx={{ color: 'grey.500', fontSize: 14, mb: 1 }}>Stock: {item.stock}</Typography>
-                                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                            <IconButton size="small" onClick={() => handleQtyChange(item.id, -1)}>
-                                                <RemoveIcon fontSize="small" />
-                                            </IconButton>
-                                            <Typography sx={{ minWidth: 24, textAlign: 'center', fontSize: 16 }}>{item.qty}</Typography>
-                                            <IconButton size="small" onClick={() => handleQtyChange(item.id, 1)}>
-                                                <AddIcon fontSize="small" />
-                                            </IconButton>
-                                        </Box>
-                                    </Box>
-                                    <IconButton size="large" sx={{ color: 'red', ml: 2 }} onClick={() => handleRemove(item.id)}>
-                                        <DeleteIcon />
-                                    </IconButton>
-                                </Box>
-                            </Card>
-                        ))
-                    )}
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 3 }}>
+                        <Box>
+                            <Box sx={{ color: 'grey.600', fontSize: 14, mb: 2 }}>
+                                Home / <b>Cart</b>
+                            </Box>
+                            <Typography variant="h4" fontWeight={700}>
+                                Your cart
+                            </Typography>
+                        </Box>
+                        <Box sx={{ display: { xs: 'none', sm: 'block' } }}>
+                            <Typography sx={{ color: 'grey.600', fontWeight: 600 }}>
+                                {cartItems.length} {cartItems.length === 1 ? 'item' : 'items'}
+                            </Typography>
+                        </Box>
+                    </Box>
+
+                    {cartItems.length === 0
+                        ? renderEmptyCart()
+                        : cartItems.map(renderCartItem)
+                    }
                 </Box>
+
                 {/* Right: Order Summary */}
-                <Box sx={{ flex: 1, minWidth: 300, width: { xs: '100%', md: 350 }, mt: { xs: 4, md: 0 } }}>
-                    <Paper sx={{ p: 3, borderRadius: 3, boxShadow: '0 2px 8px 0 rgba(0,0,0,0.04)' }}>
-                        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-                            <Typography fontWeight={700} fontSize={18}>Order Summary</Typography>
-                            <Typography color="primary" fontSize={14}>{orderDate}</Typography>
+                <Box sx={{
+                    flex: 1,
+                    minWidth: 300,
+                    width: { xs: '100%', md: 350 },
+                    mt: { xs: 4, md: 0 },
+                    position: { md: 'sticky' },
+                    top: { md: 24 }
+                }}>
+                    <Paper sx={{
+                        p: 3,
+                        borderRadius: 2,
+                        boxShadow: '0 2px 8px 0 rgba(0,0,0,0.04)'
+                    }}>
+                        <Box sx={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            mb: 2
+                        }}>
+                            <Typography fontWeight={700} fontSize={18}>
+                                Order Summary
+                            </Typography>
+                            <Typography color="primary" fontSize={14}>
+                                {CURRENT_DATE}
+                            </Typography>
                         </Box>
                         <Divider sx={{ mb: 2 }} />
+
                         <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 2 }}>
-                            <Typography color="text.secondary" fontSize={15}>Subtotal</Typography>
-                            <Typography fontWeight={600} fontSize={15}>${subtotal.toFixed(2)}</Typography>
+                            <Typography color="text.secondary" fontSize={15}>
+                                Subtotal
+                            </Typography>
+                            <Typography fontWeight={600} fontSize={15}>
+                                ${orderSummary.subtotal.toFixed(2)}
+                            </Typography>
                         </Box>
+
                         <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 2 }}>
-                            <Typography color="text.secondary" fontSize={15}>Shipping</Typography>
-                            <Typography fontWeight={600} fontSize={15}>${shipping.toFixed(2)}</Typography>
+                            <Typography color="text.secondary" fontSize={15}>
+                                Shipping
+                            </Typography>
+                            <Typography fontWeight={600} fontSize={15}>
+                                ${orderSummary.shipping.toFixed(2)}
+                            </Typography>
                         </Box>
+
                         <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 2 }}>
-                            <Typography color="text.secondary" fontSize={15}>Tax</Typography>
-                            <Typography fontWeight={600} fontSize={15}>${tax.toFixed(2)}</Typography>
+                            <Typography color="text.secondary" fontSize={15}>
+                                Tax
+                            </Typography>
+                            <Typography fontWeight={600} fontSize={15}>
+                                ${orderSummary.tax.toFixed(2)}
+                            </Typography>
                         </Box>
+
                         <Divider sx={{ mb: 2 }} />
+
                         <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 3 }}>
-                            <Typography fontWeight={700} fontSize={16}>Total</Typography>
-                            <Typography fontWeight={700} fontSize={16}>${total.toFixed(2)}</Typography>
+                            <Typography fontWeight={700} fontSize={16}>
+                                Total
+                            </Typography>
+                            <Typography fontWeight={700} fontSize={16}>
+                                ${orderSummary.total.toFixed(2)}
+                            </Typography>
                         </Box>
+
                         <Button
                             variant="contained"
                             fullWidth
-                            disabled={cartItems.length === 0 || authState.loading}
+                            disabled={cartItems.length === 0 || loading}
                             onClick={handlePlaceOrder}
                             sx={{
                                 fontWeight: 600,
@@ -283,11 +438,17 @@ const Cart = () => {
                                 '&:hover': { bgcolor: '#222' }
                             }}
                         >
-                            {authState.loading ? 'Loading...' : authService.isAuthenticated() ? 'Place order' : 'Sign in to place order'}
+                            {loading ? 'Loading...' :
+                                isAuthenticated ? 'Place order' :
+                                    'Sign in to place order'}
                         </Button>
 
-                        {!authService.isAuthenticated && !authState.loading && (
-                            <Typography color="text.secondary" align="center" sx={{ mt: 2, fontSize: 14 }}>
+                        {!isAuthenticated && !loading && (
+                            <Typography
+                                color="text.secondary"
+                                align="center"
+                                sx={{ mt: 2, fontSize: 14 }}
+                            >
                                 You'll need to sign in to complete your purchase
                             </Typography>
                         )}
@@ -306,6 +467,7 @@ const Cart = () => {
                     onClose={handleCloseNotification}
                     severity={notification.severity}
                     sx={{ width: '100%' }}
+                    variant="filled"
                 >
                     {notification.message}
                 </Alert>
@@ -314,4 +476,4 @@ const Cart = () => {
     );
 };
 
-export default Cart;
+export default React.memo(Cart);
